@@ -72,13 +72,11 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
-# ROTA DE IMPORTAÇÃO: Transforma o HTML em texto limpo e lê
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
     texto = conteudo.decode('windows-1252', errors='ignore') 
     
-    # MÁGICA AQUI: O BeautifulSoup remove todo o HTML e deixa só o texto puro!
     soup = BeautifulSoup(texto, 'html.parser')
     texto_limpo = soup.get_text(separator='\n')
     
@@ -86,30 +84,24 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
     cursor = conexao.cursor()
     importados = 0
 
-    # Agora que o texto está limpo, dividimos ele pelos títulos dos relatórios
     blocos = re.split(r"RELATÓRIO OPERACIONAL DE INSPEÇÃO", texto_limpo, flags=re.IGNORECASE)
     
     for bloco in blocos:
         if not bloco.strip(): continue
         
-        # Busca a Tag
         tag_match = re.search(r"Tag\s*SAP:\s*([^\n]+)", bloco, re.IGNORECASE)
         if not tag_match: continue
         tag = tag_match.group(1).strip()
         
-        # Busca a Criticidade
         crit_match = re.search(r"Data:\s*\d{2}/\d{2}/\d{2}\s*\n*([A-Z0-9]{2})", bloco, re.IGNORECASE)
         criticidade = crit_match.group(1).strip() if crit_match else ""
         
-        # Busca a Descrição
         desc_match = re.search(r"Descri[çc][ãa]o:\s*(.*?)\s*Resp\.", bloco, re.IGNORECASE | re.DOTALL)
         descricao = desc_match.group(1).strip() if desc_match else "Sem descrição"
         
-        # Busca o Diagnóstico
         diag_match = re.search(r"DIAGN[ÓO]STICO:\s*(.*?)\s*RECOMENDA[ÇC][ÕO]ES:", bloco, re.IGNORECASE | re.DOTALL)
         diagnostico = diag_match.group(1).strip() if diag_match else "Sem diagnóstico"
         
-        # Busca a Recomendação
         rec_match = re.search(r"RECOMENDA[ÇC][ÕO]ES:\s*(.*?)\s*FEED-BACK:", bloco, re.IGNORECASE | re.DOTALL)
         recomendacao = rec_match.group(1).strip() if rec_match else "Sem recomendação"
 
@@ -126,3 +118,89 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
     conexao.commit()
     conexao.close()
     return {"sucesso": True, "importados": importados}
+
+# ROTA PARA O PCM: Lista as 9 TAGs importadas
+@app.get("/tags_pcm")
+async def listar_tags_pcm():
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    cursor.execute("SELECT tag_sap, descricao, criticidade FROM tags_importadas WHERE status = 'Aguardando PCM'")
+    resultados = cursor.fetchall()
+    conexao.close()
+    return [{"tag": l[0], "descricao": l[1], "criticidade": l[2]} for l in resultados]
+
+# ROTA PARA O PCM: Salvar a programação
+@app.post("/programar_ordem")
+async def programar_ordem(
+    tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...),
+    semana: str = Form(...), parada: str = Form(...), apoio: str = Form(...)
+):
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    cursor.execute("""
+        INSERT INTO ordens (tag_sap, numero_sap, executante, semana, parada, apoio)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (tag, numero_sap, executante, semana, parada, apoio))
+    
+    cursor.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
+    conexao.commit()
+    conexao.close()
+    return {"sucesso": True}
+
+# ROTA PARA O MECÂNICO: Lista as ordens que já foram programadas pelo PCM
+@app.get("/minhas_ordens")
+async def listar_minhas_ordens():
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    cursor.execute("""
+        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao
+        FROM ordens o
+        JOIN tags_importadas t ON o.tag_sap = t.tag_sap
+        WHERE o.status = 'Pendente'
+    """)
+    resultados = cursor.fetchall()
+    conexao.close()
+    
+    ordens = []
+    for linha in resultados:
+        ordens.append({
+            "id": linha[0], "tag": linha[1], "descricao": linha[2], 
+            "criticidade": linha[3], "numero_sap": linha[4],
+            "diagnostico": linha[5], "recomendacao": linha[6]
+        })
+    return ordens
+
+# ROTA PARA O MECÂNICO: Registrar execução
+@app.post("/executar")
+async def registrar_execucao(
+    tag: str = Form(...), observacao: str = Form(...), 
+    foto_antes: UploadFile = File(...), foto_depois: UploadFile = File(...)
+):
+    id_foto_antes = str(uuid.uuid4()) + "_antes.jpg"
+    id_foto_depois = str(uuid.uuid4()) + "_depois.jpg"
+
+    with open(f"fotos/{id_foto_antes}", "wb") as buffer:
+        shutil.copyfileobj(foto_antes.file, buffer)
+    with open(f"fotos/{id_foto_depois}", "wb") as buffer:
+        shutil.copyfileobj(foto_depois.file, buffer)
+
+    fuso_brasilia = datetime.utcnow() - timedelta(hours=3)
+    data_formatada = fuso_brasilia.strftime("%d/%m/%Y %H:%M:%S")
+
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    
+    cursor.execute("""
+        INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora)
+        VALUES (?, ?, ?, ?, ?)
+    """, (tag, observacao, id_foto_antes, id_foto_depois, data_formatada))
+    
+    cursor.execute("UPDATE ordens SET status = 'Concluída' WHERE tag_sap = ?", (tag,))
+    
+    conexao.commit()
+    conexao.close()
+    return {"sucesso": True}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
