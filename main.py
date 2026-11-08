@@ -131,10 +131,11 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 async def listar_tags_pcm():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("SELECT tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE status = 'Aguardando PCM'")
+    # Agora mandamos o ID para o HTML
+    cursor.execute("SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE status = 'Aguardando PCM'")
     resultados = cursor.fetchall()
     conexao.close()
-    return [{"tag": l[0], "descricao": l[1], "criticidade": l[2], "data_inspecao": l[3], "num_relatorio": l[4], "diagnostico": l[5], "recomendacao": l[6]} for l in resultados]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in resultados]
 
 @app.post("/programar_ordem")
 async def programar_ordem(
