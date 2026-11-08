@@ -4,6 +4,7 @@ import shutil
 import os
 import uuid
 import sqlite3
+from datetime import datetime, timedelta
 
 app = FastAPI(title="SR VibManager API")
 
@@ -22,19 +23,19 @@ def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     
-    # Tabela de Execuções (já existia)
+    # Tabela de Execuções (Versão 2 - Fuso Brasília)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS execucoes (
+        CREATE TABLE IF NOT EXISTS execucoes_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tag TEXT,
             observacao TEXT,
             foto_antes TEXT,
             foto_depois TEXT,
-            data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            data_hora TEXT
         )
     """)
     
-    # NOVA Tabela de Usuários
+    # Tabela de Usuários
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,15 +46,14 @@ def iniciar_banco():
         )
     """)
     
-    # Cria um usuário de teste para cada perfil (se não existirem)
-    # Senha padrão para todos: 1234
+    # Cria usuários de teste (senha padrão: 1234)
     try:
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("1045", "1234", "João Mecânico", "mecanico"))
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("2000", "1234", "Ricardo PCM", "pcm"))
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("3000", "1234", "Eng. Barth", "engenharia"))
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("4000", "1234", "Adriano Elétrica", "eletronica"))
     except sqlite3.IntegrityError:
-        pass # Os usuários já existem
+        pass 
     
     conexao.commit()
     conexao.close()
@@ -77,7 +77,8 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
 async def listar_historico():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("SELECT tag, observacao, data_hora FROM execucoes ORDER BY id DESC")
+    # Puxa da tabela nova
+    cursor.execute("SELECT tag, observacao, data_hora FROM execucoes_v2 ORDER BY id DESC")
     resultados = cursor.fetchall()
     conexao.close()
     
@@ -101,12 +102,16 @@ async def registrar_execucao(
     with open(f"fotos/{id_foto_depois}", "wb") as buffer:
         shutil.copyfileobj(foto_depois.file, buffer)
 
+    # FORÇA O HORÁRIO DE BRASÍLIA (UTC-3)
+    fuso_brasilia = datetime.utcnow() - timedelta(hours=3)
+    data_formatada = fuso_brasilia.strftime("%d/%m/%Y %H:%M:%S")
+
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     cursor.execute("""
-        INSERT INTO execucoes (tag, observacao, foto_antes, foto_depois)
-        VALUES (?, ?, ?, ?)
-    """, (tag, observacao, id_foto_antes, id_foto_depois))
+        INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora)
+        VALUES (?, ?, ?, ?, ?)
+    """, (tag, observacao, id_foto_antes, id_foto_depois, data_formatada))
     conexao.commit()
     conexao.close()
 
