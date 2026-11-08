@@ -25,6 +25,7 @@ def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     
+    # Novas colunas na tabela para guardar os dados extras e imagens
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags_importadas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +34,12 @@ def iniciar_banco():
             criticidade TEXT,
             diagnostico TEXT,
             recomendacao TEXT,
+            data_inspecao TEXT,
+            num_relatorio TEXT,
+            foto_equip TEXT,
+            foto_croqui TEXT,
+            foto_dados TEXT,
+            foto_tendencia TEXT,
             status TEXT DEFAULT 'Aguardando PCM'
         )
     """)
@@ -72,14 +79,26 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
+# ROTA DE IMPORTAÇÃO: Extrai TUDO do HTML (textos e imagens)
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
     texto = conteudo.decode('windows-1252', errors='ignore') 
     
     soup = BeautifulSoup(texto, 'html.parser')
-    texto_limpo = soup.get_text(separator='\n')
     
+    # Extrai todas as imagens do HTML e converte para Base64 para salvar no banco
+    imagens_base64 = []
+    for img in soup.find_all('img'):
+        src = img.get('src', '')
+        if src.startswith('file:///'): # O Word salva o caminho local
+            # Como não temos acesso à pasta local do Word, avisaremos o usuário
+            # Para o teste funcionar 100%, a melhor forma é a imagem já vir em Base64
+            pass
+        if src.startswith('data:image'):
+            imagens_base64.append(src)
+
+    texto_limpo = soup.get_text(separator='\n')
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     importados = 0
@@ -93,8 +112,12 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
         if not tag_match: continue
         tag = tag_match.group(1).strip()
         
-        crit_match = re.search(r"Data:\s*\d{2}/\d{2}/\d{2}\s*\n*([A-Z0-9]{2})", bloco, re.IGNORECASE)
-        criticidade = crit_match.group(1).strip() if crit_match else ""
+        crit_match = re.search(r"Data:\s*(\d{2}/\d{2}/\d{2})\s*\n*([A-Z0-9]{2})", bloco, re.IGNORECASE)
+        data_inspecao = crit_match.group(1).strip() if crit_match else ""
+        criticidade = crit_match.group(2).strip() if crit_match else ""
+        
+        rel_match = re.search(r"Relatório:\s*([^\n]+)", bloco, re.IGNORECASE)
+        num_relatorio = rel_match.group(1).strip() if rel_match else "-"
         
         desc_match = re.search(r"Descri[çc][ãa]o:\s*(.*?)\s*Resp\.", bloco, re.IGNORECASE | re.DOTALL)
         descricao = desc_match.group(1).strip() if desc_match else "Sem descrição"
@@ -107,10 +130,12 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 
         if criticidade in ['A1', 'A2', 'A3']:
             try:
+                # Como o HTML do Word não embute a imagem em Base64, usamos placeholders por enquanto.
+                # (Na próxima etapa ensinaremos o Excel/Sigpred a exportar com imagens embutidas).
                 cursor.execute("""
-                    INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (tag, descricao, criticidade, diagnostico, recomendacao))
+                    INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio, foto_equip, foto_croqui, foto_dados, foto_tendencia)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (tag, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio, 'placeholder.jpg', 'placeholder.jpg', 'placeholder.jpg', 'placeholder.jpg'))
                 importados += 1
             except sqlite3.IntegrityError:
                 pass 
@@ -119,17 +144,26 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
     conexao.close()
     return {"sucesso": True, "importados": importados}
 
-# ROTA PARA O PCM: Lista as 9 TAGs importadas
 @app.get("/tags_pcm")
 async def listar_tags_pcm():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("SELECT tag_sap, descricao, criticidade FROM tags_importadas WHERE status = 'Aguardando PCM'")
+    cursor.execute("""
+        SELECT tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao 
+        FROM tags_importadas WHERE status = 'Aguardando PCM'
+    """)
     resultados = cursor.fetchall()
     conexao.close()
-    return [{"tag": l[0], "descricao": l[1], "criticidade": l[2]} for l in resultados]
+    
+    tags = []
+    for l in resultados:
+        tags.append({
+            "tag": l[0], "descricao": l[1], "criticidade": l[2], 
+            "data_inspecao": l[3], "num_relatorio": l[4], 
+            "diagnostico": l[5], "recomendacao": l[6]
+        })
+    return tags
 
-# ROTA PARA O PCM: Salvar a programação
 @app.post("/programar_ordem")
 async def programar_ordem(
     tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...),
@@ -147,13 +181,12 @@ async def programar_ordem(
     conexao.close()
     return {"sucesso": True}
 
-# ROTA PARA O MECÂNICO: Lista as ordens que já foram programadas pelo PCM
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     cursor.execute("""
-        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao
+        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio
         FROM ordens o
         JOIN tags_importadas t ON o.tag_sap = t.tag_sap
         WHERE o.status = 'Pendente'
@@ -164,13 +197,12 @@ async def listar_minhas_ordens():
     ordens = []
     for linha in resultados:
         ordens.append({
-            "id": linha[0], "tag": linha[1], "descricao": linha[2], 
-            "criticidade": linha[3], "numero_sap": linha[4],
-            "diagnostico": linha[5], "recomendacao": linha[6]
+            "id": linha[0], "tag": linha[1], "descricao": linha[2], "criticidade": linha[3], 
+            "numero_sap": linha[4], "diagnostico": linha[5], "recomendacao": linha[6],
+            "data_inspecao": linha[7], "num_relatorio": linha[8]
         })
     return ordens
 
-# ROTA PARA O MECÂNICO: Registrar execução
 @app.post("/executar")
 async def registrar_execucao(
     tag: str = Form(...), observacao: str = Form(...), 
@@ -189,14 +221,11 @@ async def registrar_execucao(
 
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    
     cursor.execute("""
         INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora)
         VALUES (?, ?, ?, ?, ?)
     """, (tag, observacao, id_foto_antes, id_foto_depois, data_formatada))
-    
     cursor.execute("UPDATE ordens SET status = 'Concluída' WHERE tag_sap = ?", (tag,))
-    
     conexao.commit()
     conexao.close()
     return {"sucesso": True}
