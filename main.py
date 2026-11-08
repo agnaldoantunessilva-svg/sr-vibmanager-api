@@ -10,22 +10,20 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
 if not os.path.exists("fotos"): os.makedirs("fotos")
 
 def iniciar_banco():
-    conexao = sqlite3.connect("sr_vibmanager.db")
-    cursor = conexao.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, dia_semana TEXT, data_execucao TEXT, status TEXT DEFAULT 'Pendente')""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT)""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
-    cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (matricula TEXT UNIQUE, senha TEXT, nome TEXT, perfil TEXT)")
+    conn = sqlite3.connect("sr_vibmanager.db")
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
+    # TABELA ORDENS SEM DIA DA SEMANA
+    cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, status TEXT DEFAULT 'Pendente')""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
+    cur.execute("CREATE TABLE IF NOT EXISTS usuarios (matricula TEXT UNIQUE, senha TEXT, nome TEXT, perfil TEXT)")
     try:
-        cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'Agnaldo', 'mecanico')")
-        cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('2000', '1234', 'Ricardo PCM', 'pcm')")
-        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Agnaldo', 'Mecânico')")
-        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('William', 'Mecânico')")
-        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Aferitec', 'Terceiro')")
+        cur.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'Agnaldo', 'mecanico')")
+        cur.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('2000', '1234', 'Ricardo PCM', 'pcm')")
     except sqlite3.IntegrityError: pass 
-    conexao.commit()
-    conexao.close()
+    conn.commit()
+    conn.close()
 
 iniciar_banco()
 
@@ -93,31 +91,25 @@ async def listar_tags_pcm():
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
 
 @app.post("/programar_ordem")
-async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...), apoio: str = Form(...), dia_semana: str = Form(...), data_execucao: str = Form(...)):
+async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...), apoio: str = Form(...), data_execucao: str = Form(...)):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    # Força a data para o formato YYYY-MM-DD caso venha com barras
+    
+    # Garante que a data está no formato YYYY-MM-DD
     if '/' in data_execucao:
         p = data_execucao.split('/')
         if len(p) == 3: data_execucao = f"{p[2]}-{p[1]}-{p[0]}"
     
-    cur.execute("""INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, dia_semana, data_execucao) VALUES (?, ?, ?, ?, ?, ?)""", (tag, numero_sap, executante, apoio, dia_semana, data_execucao))
+    cur.execute("""INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, data_execucao) VALUES (?, ?, ?, ?, ?)""", (tag, numero_sap, executante, apoio, data_execucao))
     cur.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conn.commit(); conn.close(); return {"sucesso": True}
 
-@app.get("/resumo_semana")
-async def resumo_semana(executante: str):
-    conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("SELECT dia_semana, COUNT(*) FROM ordens WHERE (executante = ? OR apoio = ?) AND status = 'Pendente' GROUP BY dia_semana", (executante, executante))
-    res = cur.fetchall(); conn.close()
-    dias = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
-    return [{"dia": d, "quantidade": next((r[1] for r in res if r[0] == d), 0)} for d in dias]
-
+# BUSCA TODAS AS ORDENS DO MECÂNICO (O FRONTEND VAI FILTRAR POR DATA)
 @app.get("/minhas_ordens")
-async def listar_minhas_ordens(executante: str, dia: str):
+async def listar_minhas_ordens(executante: str):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("""SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.dia_semana, o.data_execucao FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?) AND o.dia_semana = ?""", (executante, executante, dia))
+    cur.execute("""SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.data_execucao FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)""", (executante, executante))
     res = cur.fetchall(); conn.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "dia_semana": l[11], "data_execucao": l[12]} for l in res]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11]} for l in res]
 
 @app.post("/executar")
 async def registrar_execucao(tag: str = Form(...), observacao: str = Form(...), foto_antes: UploadFile = File(...), foto_depois: UploadFile = File(...)):
