@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from bs4 import BeautifulSoup
 import shutil
 import os
 import uuid
@@ -71,48 +72,70 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
+# ROTA DE IMPORTAÇÃO: Lê o arquivo HTML do Word
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
-    texto = conteudo.decode('utf-8', errors='ignore') 
+    # O Word salva em windows-1252, então decodificamos assim
+    texto = conteudo.decode('windows-1252', errors='ignore') 
+    
+    soup = BeautifulSoup(texto, 'html.parser')
     
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     importados = 0
 
-    # Divide o texto em blocos de relatórios
-    blocos = texto.split("RELATÓRIO OPERACIONAL DE INSPEÇĂO")
+    # Encontra todas as tabelas do relatório
+    tabelas = soup.find_all('table')
     
-    for bloco in blocos:
-        if not bloco.strip(): continue
+    # O Word cria várias tabelas por relatório. Vamos agrupar os dados.
+    for tabela in tabelas:
+        # Procura a Tag SAP
+        tag_cell = tabela.find(string=re.compile("Tag SAP:", re.IGNORECASE))
+        if not tag_cell: continue
         
-        # Extrai a TAG
-        tag_match = re.search(r"Tag\s*SAP:\s*([^\s]+)", bloco)
-        if not tag_match: continue
-        tag = tag_match.group(1).strip()
+        tag_text = tag_cell.find_parent('p').get_text(strip=True)
+        tag = tag_text.replace("Tag SAP:", "").strip()
         
-        # Extrai a Criticidade
-        crit_match = re.search(r"Data:\s*\d{2}/\d{2}/\d{2}\s*(A1|A2|A3|A4|N|P|M)", bloco)
-        if not crit_match: continue
-        criticidade = crit_match.group(1).strip()
-        
-        # Extrai a Descrição
-        desc_match = re.search(r"Descriçăo:\s*(.*?)\s*Resp\.:", bloco, re.DOTALL)
-        descricao = desc_match.group(1).strip() if desc_match else "Sem descrição"
-        
-        # Extrai o Diagnóstico
-        diag_match = re.search(r"DIAGNÓSTICO:\s*(.*?)\s*RECOMENDAÇŐES:", bloco, re.DOTALL)
-        diagnostico = diag_match.group(1).strip() if diag_match else "Sem diagnóstico"
-        
-        # Extrai a Recomendação
-        rec_match = re.search(r"RECOMENDAÇŐES:\s*(.*?)\s*FEED-BACK:", bloco, re.DOTALL)
-        recomendacao = rec_match.group(1).strip() if rec_match else "Sem recomendação"
+        # Procura a Criticidade (A1, A2, A3, etc)
+        crit_cell = tabela.find('td', style=re.compile("background:red|background:yellow"))
+        criticidade = ""
+        if crit_cell:
+            criticidade = crit_cell.get_text(strip=True)
+            
+        # Procura a Descrição
+        desc_cell = tabela.find(string=re.compile("Descrição:", re.IGNORECASE))
+        descricao = "Sem descrição"
+        if desc_cell:
+            desc_text = desc_cell.find_parent('p').get_text(strip=True)
+            descricao = desc_text.replace("Descrição:", "").strip()
+            
+        # Se encontrou uma TAG e a criticidade for A1, A2 ou A3, é um alarme válido
+        if tag and criticidade in ['A1', 'A2', 'A3']:
+            
+            # Agora precisamos do Diagnóstico e da Recomendação. 
+            # Eles estão em tabelas separadas logo após o título.
+            # Vamos procurar no texto inteiro do documento ao invés da tabela.
+            # (Para simplificar, vamos pegar o bloco de texto que começa na Tag e vai até a próxima Tag)
+            
+            diagnostico = "Sem diagnóstico"
+            recomendacao = "Sem recomendação"
+            
+            # Busca o diagnóstico
+            diag_h = soup.find(string=re.compile("DIAGNÓSTICO:", re.IGNORECASE))
+            if diag_h:
+                diag_table = diag_h.find_next('table')
+                if diag_table:
+                    diagnostico = diag_table.get_text(separator=' ', strip=True)
+                    
+            # Busca a recomendação
+            rec_h = soup.find(string=re.compile("RECOMENDAÇÕES:", re.IGNORECASE))
+            if rec_h:
+                rec_table = rec_h.find_next('table')
+                if rec_table:
+                    recomendacao = rec_table.get_text(separator=' ', strip=True)
 
-        if criticidade in ['A1', 'A2', 'A3']:
             try:
-                diagnostico = " ".join(diagnostico.split())
-                recomendacao = " ".join(recomendacao.split())
-                
                 cursor.execute("""
                     INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao)
                     VALUES (?, ?, ?, ?, ?)
