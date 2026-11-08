@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 import os
@@ -7,11 +7,10 @@ import sqlite3
 
 app = FastAPI(title="SR VibManager API")
 
-# Configuração de CORS liberada para testes locais
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
-    allow_credentials=False, # Tem que ser False quando usamos "*"
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -22,6 +21,8 @@ if not os.path.exists("fotos"):
 def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
+    
+    # Tabela de Execuções (já existia)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS execucoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +33,28 @@ def iniciar_banco():
             data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # NOVA Tabela de Usuários
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            matricula TEXT UNIQUE,
+            senha TEXT,
+            nome TEXT,
+            perfil TEXT
+        )
+    """)
+    
+    # Cria um usuário de teste para cada perfil (se não existirem)
+    # Senha padrão para todos: 1234
+    try:
+        cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("1045", "1234", "João Mecânico", "mecanico"))
+        cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("2000", "1234", "Ricardo PCM", "pcm"))
+        cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("3000", "1234", "Eng. Barth", "engenharia"))
+        cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES (?, ?, ?, ?)", ("4000", "1234", "Adriano Elétrica", "eletronica"))
+    except sqlite3.IntegrityError:
+        pass # Os usuários já existem
+    
     conexao.commit()
     conexao.close()
 
@@ -39,14 +62,16 @@ iniciar_banco()
 
 @app.post("/login")
 async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
-    return {"sucesso": True, "nome": "João Silva"}
-
-@app.get("/ordens")
-async def listar_ordens():
-    return [
-        {"id": 1, "tag": "BP03-INDU-R1-R1E-GR01-MTR11", "desc": "Soprador", "criticidade": "A2"},
-        {"id": 2, "tag": "BP03-INDU-R1-R1M-GE01-MTR02", "desc": "Sul moinho 90%", "criticidade": "A2"}
-    ]
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    cursor.execute("SELECT nome, perfil FROM usuarios WHERE matricula = ? AND senha = ?", (matricula, senha))
+    usuario = cursor.fetchone()
+    conexao.close()
+    
+    if usuario:
+        return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
+    else:
+        raise HTTPException(status_code=401, detail="Matrícula ou senha incorretos")
 
 @app.get("/historico")
 async def listar_historico():
@@ -58,11 +83,7 @@ async def listar_historico():
     
     historico = []
     for linha in resultados:
-        historico.append({
-            "tag": linha[0],
-            "observacao": linha[1],
-            "data_hora": linha[2]
-        })
+        historico.append({"tag": linha[0], "observacao": linha[1], "data_hora": linha[2]})
     return historico
 
 @app.post("/executar")
@@ -89,7 +110,6 @@ async def registrar_execucao(
     conexao.commit()
     conexao.close()
 
-    print(f"✅ Ordem Finalizada! TAG: {tag}")
     return {"sucesso": True}
 
 if __name__ == "__main__":
