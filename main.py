@@ -41,7 +41,7 @@ def iniciar_banco():
         )
     """)
     
-    # Tabela de Ordens
+    # Tabela de Ordens (Agora com Data de Execução e sem Parada/Semana)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ordens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,13 +50,12 @@ def iniciar_banco():
             executante TEXT,
             apoio TEXT,
             dia_semana TEXT,
-            semana TEXT,
-            parada TEXT,
+            data_execucao TEXT,
             status TEXT DEFAULT 'Pendente'
         )
     """)
     
-    # NOVA TABELA: Cadastro de Equipe (Executantes e Apoios)
+    # Tabela de Equipe
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS equipe (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,10 +70,9 @@ def iniciar_banco():
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'João Mecânico', 'mecanico')")
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('2000', '1234', 'Ricardo PCM', 'pcm')")
         
-        # Cadastra alguns nomes iniciais para teste
+        # Cadastra nomes iniciais para teste
         cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Agnaldo', 'Mecânico')")
         cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Ismael', 'Mecânico')")
-        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('William', 'Padrinho')")
         cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Aferitec', 'Terceiro')")
     except sqlite3.IntegrityError:
         pass 
@@ -94,7 +92,6 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
-# --- ROTAS DA EQUIPE (CADASTRO) ---
 @app.get("/equipe")
 async def listar_equipe():
     conexao = sqlite3.connect("sr_vibmanager.db")
@@ -117,7 +114,6 @@ async def cadastrar_equipe(nome: str = Form(...), funcao: str = Form(...)):
     conexao.close()
     return retorno
 
-# --- ROTAS DO SIGPRED E PCM ---
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
@@ -186,32 +182,54 @@ async def listar_tags_pcm():
 @app.post("/programar_ordem")
 async def programar_ordem(
     tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...),
-    apoio: str = Form(...), dia_semana: str = Form(...), semana: str = Form(...), parada: str = Form(...)
+    apoio: str = Form(...), dia_semana: str = Form(...), data_execucao: str = Form(...)
 ):
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     cursor.execute("""
-        INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, dia_semana, semana, parada) 
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (tag, numero_sap, executante, apoio, dia_semana, semana, parada))
+        INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, dia_semana, data_execucao) 
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (tag, numero_sap, executante, apoio, dia_semana, data_execucao))
     cursor.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conexao.commit()
     conexao.close()
     return {"sucesso": True}
 
-# --- ROTAS DO MECÂNICO ---
-@app.get("/minhas_ordens")
-async def listar_minhas_ordens():
+# ROTA PARA O MECÂNICO: Lista o resumo da semana (quantidade por dia)
+@app.get("/resumo_semana")
+async def resumo_semana(executante: str):
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    # Mostra as ordens pendentes
     cursor.execute("""
-        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.dia_semana
-        FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente'
-    """)
+        SELECT dia_semana, COUNT(*) FROM ordens 
+        WHERE executante = ? AND status = 'Pendente'
+        GROUP BY dia_semana
+    """, (executante,))
     resultados = cursor.fetchall()
     conexao.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "dia_semana": l[11]} for l in resultados]
+    
+    dias = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+    resumo = []
+    for d in dias:
+        qtd = 0
+        for r in resultados:
+            if r[0] == d: qtd = r[1]
+        resumo.append({"dia": d, "quantidade": qtd})
+    return resumo
+
+# ROTA PARA O MECÂNICO: Lista as ordens de um dia específico
+@app.get("/minhas_ordens")
+async def listar_minhas_ordens(executante: str, dia: str):
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    cursor.execute("""
+        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.dia_semana, o.data_execucao
+        FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap 
+        WHERE o.status = 'Pendente' AND o.executante = ? AND o.dia_semana = ?
+    """, (executante, dia))
+    resultados = cursor.fetchall()
+    conexao.close()
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "dia_semana": l[11], "data_execucao": l[12]} for l in resultados]
 
 @app.post("/executar")
 async def registrar_execucao(
