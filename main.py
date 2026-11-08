@@ -25,7 +25,6 @@ if not os.path.exists("fotos"):
 def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags_importadas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,7 +38,6 @@ def iniciar_banco():
             status TEXT DEFAULT 'Aguardando PCM'
         )
     """)
-    
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ordens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,14 +50,12 @@ def iniciar_banco():
             status TEXT DEFAULT 'Pendente'
         )
     """)
-    
     cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (matricula TEXT UNIQUE, senha TEXT, nome TEXT, perfil TEXT)")
     try:
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'João Mecânico', 'mecanico')")
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('2000', '1234', 'Ricardo PCM', 'pcm')")
     except sqlite3.IntegrityError:
         pass 
-    
     conexao.commit()
     conexao.close()
 
@@ -75,14 +71,10 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
-# ROTA DE IMPORTAÇÃO: Agora lê arquivos .mht e .html
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
-    
-    # Verifica se é um arquivo .mht (MIME) ou .html
     if arquivo.filename.endswith('.mht') or arquivo.filename.endswith('.mhtml'):
-        # Usa a biblioteca email para ler o arquivo .mht
         msg = email.message_from_bytes(conteudo)
         texto_html = ""
         for part in msg.walk():
@@ -90,12 +82,10 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
                 texto_html = part.get_payload(decode=True).decode('windows-1252', errors='ignore')
                 break
     else:
-        # Se for .html, lê direto
         texto_html = conteudo.decode('windows-1252', errors='ignore')
 
     soup = BeautifulSoup(texto_html, 'html.parser')
     texto_limpo = soup.get_text(separator='\n')
-    
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     importados = 0
@@ -104,7 +94,6 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
     
     for bloco in blocos:
         if not bloco.strip(): continue
-        
         tag_match = re.search(r"Tag\s*SAP:\s*([^\n]+)", bloco, re.IGNORECASE)
         if not tag_match: continue
         tag = tag_match.group(1).strip()
@@ -134,7 +123,6 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
                 importados += 1
             except sqlite3.IntegrityError:
                 pass 
-                
     conexao.commit()
     conexao.close()
     return {"sucesso": True, "importados": importados}
@@ -180,15 +168,12 @@ async def registrar_execucao(
 ):
     id_foto_antes = str(uuid.uuid4()) + "_antes.jpg"
     id_foto_depois = str(uuid.uuid4()) + "_depois.jpg"
-
     with open(f"fotos/{id_foto_antes}", "wb") as buffer:
         shutil.copyfileobj(foto_antes.file, buffer)
     with open(f"fotos/{id_foto_depois}", "wb") as buffer:
         shutil.copyfileobj(foto_depois.file, buffer)
-
     fuso_brasilia = datetime.utcnow() - timedelta(hours=3)
     data_formatada = fuso_brasilia.strftime("%d/%m/%Y %H:%M:%S")
-
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     cursor.execute("INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora) VALUES (?, ?, ?, ?, ?)", (tag, observacao, id_foto_antes, id_foto_depois, data_formatada))
