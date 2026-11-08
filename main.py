@@ -72,69 +72,48 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
-# ROTA DE IMPORTAÇÃO: Lê o arquivo HTML do Word
+# ROTA DE IMPORTAÇÃO: Transforma o HTML em texto limpo e lê
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
-    # O Word salva em windows-1252, então decodificamos assim
     texto = conteudo.decode('windows-1252', errors='ignore') 
     
+    # MÁGICA AQUI: O BeautifulSoup remove todo o HTML e deixa só o texto puro!
     soup = BeautifulSoup(texto, 'html.parser')
+    texto_limpo = soup.get_text(separator='\n')
     
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     importados = 0
 
-    # Encontra todas as tabelas do relatório
-    tabelas = soup.find_all('table')
+    # Agora que o texto está limpo, dividimos ele pelos títulos dos relatórios
+    blocos = re.split(r"RELATÓRIO OPERACIONAL DE INSPEÇÃO", texto_limpo, flags=re.IGNORECASE)
     
-    # O Word cria várias tabelas por relatório. Vamos agrupar os dados.
-    for tabela in tabelas:
-        # Procura a Tag SAP
-        tag_cell = tabela.find(string=re.compile("Tag SAP:", re.IGNORECASE))
-        if not tag_cell: continue
+    for bloco in blocos:
+        if not bloco.strip(): continue
         
-        tag_text = tag_cell.find_parent('p').get_text(strip=True)
-        tag = tag_text.replace("Tag SAP:", "").strip()
+        # Busca a Tag
+        tag_match = re.search(r"Tag\s*SAP:\s*([^\n]+)", bloco, re.IGNORECASE)
+        if not tag_match: continue
+        tag = tag_match.group(1).strip()
         
-        # Procura a Criticidade (A1, A2, A3, etc)
-        crit_cell = tabela.find('td', style=re.compile("background:red|background:yellow"))
-        criticidade = ""
-        if crit_cell:
-            criticidade = crit_cell.get_text(strip=True)
-            
-        # Procura a Descrição
-        desc_cell = tabela.find(string=re.compile("Descrição:", re.IGNORECASE))
-        descricao = "Sem descrição"
-        if desc_cell:
-            desc_text = desc_cell.find_parent('p').get_text(strip=True)
-            descricao = desc_text.replace("Descrição:", "").strip()
-            
-        # Se encontrou uma TAG e a criticidade for A1, A2 ou A3, é um alarme válido
-        if tag and criticidade in ['A1', 'A2', 'A3']:
-            
-            # Agora precisamos do Diagnóstico e da Recomendação. 
-            # Eles estão em tabelas separadas logo após o título.
-            # Vamos procurar no texto inteiro do documento ao invés da tabela.
-            # (Para simplificar, vamos pegar o bloco de texto que começa na Tag e vai até a próxima Tag)
-            
-            diagnostico = "Sem diagnóstico"
-            recomendacao = "Sem recomendação"
-            
-            # Busca o diagnóstico
-            diag_h = soup.find(string=re.compile("DIAGNÓSTICO:", re.IGNORECASE))
-            if diag_h:
-                diag_table = diag_h.find_next('table')
-                if diag_table:
-                    diagnostico = diag_table.get_text(separator=' ', strip=True)
-                    
-            # Busca a recomendação
-            rec_h = soup.find(string=re.compile("RECOMENDAÇÕES:", re.IGNORECASE))
-            if rec_h:
-                rec_table = rec_h.find_next('table')
-                if rec_table:
-                    recomendacao = rec_table.get_text(separator=' ', strip=True)
+        # Busca a Criticidade
+        crit_match = re.search(r"Data:\s*\d{2}/\d{2}/\d{2}\s*\n*([A-Z0-9]{2})", bloco, re.IGNORECASE)
+        criticidade = crit_match.group(1).strip() if crit_match else ""
+        
+        # Busca a Descrição
+        desc_match = re.search(r"Descri[çc][ãa]o:\s*(.*?)\s*Resp\.", bloco, re.IGNORECASE | re.DOTALL)
+        descricao = desc_match.group(1).strip() if desc_match else "Sem descrição"
+        
+        # Busca o Diagnóstico
+        diag_match = re.search(r"DIAGN[ÓO]STICO:\s*(.*?)\s*RECOMENDA[ÇC][ÕO]ES:", bloco, re.IGNORECASE | re.DOTALL)
+        diagnostico = diag_match.group(1).strip() if diag_match else "Sem diagnóstico"
+        
+        # Busca a Recomendação
+        rec_match = re.search(r"RECOMENDA[ÇC][ÕO]ES:\s*(.*?)\s*FEED-BACK:", bloco, re.IGNORECASE | re.DOTALL)
+        recomendacao = rec_match.group(1).strip() if rec_match else "Sem recomendação"
 
+        if criticidade in ['A1', 'A2', 'A3']:
             try:
                 cursor.execute("""
                     INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao)
@@ -147,33 +126,3 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
     conexao.commit()
     conexao.close()
     return {"sucesso": True, "importados": importados}
-
-@app.get("/tags_pcm")
-async def listar_tags_pcm():
-    conexao = sqlite3.connect("sr_vibmanager.db")
-    cursor = conexao.cursor()
-    cursor.execute("SELECT tag_sap, descricao, criticidade FROM tags_importadas WHERE status = 'Aguardando PCM'")
-    resultados = cursor.fetchall()
-    conexao.close()
-    return [{"tag": l[0], "descricao": l[1], "criticidade": l[2]} for l in resultados]
-
-@app.post("/programar_ordem")
-async def programar_ordem(
-    tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...),
-    semana: str = Form(...), parada: str = Form(...), apoio: str = Form(...)
-):
-    conexao = sqlite3.connect("sr_vibmanager.db")
-    cursor = conexao.cursor()
-    cursor.execute("""
-        INSERT INTO ordens (tag_sap, numero_sap, executante, semana, parada, apoio)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (tag, numero_sap, executante, semana, parada, apoio))
-    
-    cursor.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
-    conexao.commit()
-    conexao.close()
-    return {"sucesso": True}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
