@@ -25,6 +25,8 @@ if not os.path.exists("fotos"):
 def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
+    
+    # Tabela de TAGs importadas
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags_importadas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,24 +40,45 @@ def iniciar_banco():
             status TEXT DEFAULT 'Aguardando PCM'
         )
     """)
+    
+    # Tabela de Ordens
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ordens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tag_sap TEXT,
             numero_sap TEXT,
             executante TEXT,
+            apoio TEXT,
+            dia_semana TEXT,
             semana TEXT,
             parada TEXT,
-            apoio TEXT,
             status TEXT DEFAULT 'Pendente'
         )
     """)
+    
+    # NOVA TABELA: Cadastro de Equipe (Executantes e Apoios)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS equipe (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT UNIQUE,
+            funcao TEXT
+        )
+    """)
+    
+    # Tabela de Usuários
     cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (matricula TEXT UNIQUE, senha TEXT, nome TEXT, perfil TEXT)")
     try:
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'João Mecânico', 'mecanico')")
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('2000', '1234', 'Ricardo PCM', 'pcm')")
+        
+        # Cadastra alguns nomes iniciais para teste
+        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Agnaldo', 'Mecânico')")
+        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Ismael', 'Mecânico')")
+        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('William', 'Padrinho')")
+        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES ('Aferitec', 'Terceiro')")
     except sqlite3.IntegrityError:
         pass 
+    
     conexao.commit()
     conexao.close()
 
@@ -71,6 +94,30 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
+# --- ROTAS DA EQUIPE (CADASTRO) ---
+@app.get("/equipe")
+async def listar_equipe():
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    cursor.execute("SELECT id, nome, funcao FROM equipe")
+    resultados = cursor.fetchall()
+    conexao.close()
+    return [{"id": l[0], "nome": l[1], "funcao": l[2]} for l in resultados]
+
+@app.post("/cadastrar_equipe")
+async def cadastrar_equipe(nome: str = Form(...), funcao: str = Form(...)):
+    conexao = sqlite3.connect("sr_vibmanager.db")
+    cursor = conexao.cursor()
+    try:
+        cursor.execute("INSERT INTO equipe (nome, funcao) VALUES (?, ?)", (nome, funcao))
+        conexao.commit()
+        retorno = {"sucesso": True}
+    except sqlite3.IntegrityError:
+        retorno = {"sucesso": False, "erro": "Nome já cadastrado"}
+    conexao.close()
+    return retorno
+
+# --- ROTAS DO SIGPRED E PCM ---
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
@@ -131,7 +178,6 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 async def listar_tags_pcm():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    # Agora mandamos o ID para o HTML
     cursor.execute("SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE status = 'Aguardando PCM'")
     resultados = cursor.fetchall()
     conexao.close()
@@ -140,27 +186,32 @@ async def listar_tags_pcm():
 @app.post("/programar_ordem")
 async def programar_ordem(
     tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...),
-    semana: str = Form(...), parada: str = Form(...), apoio: str = Form(...)
+    apoio: str = Form(...), dia_semana: str = Form(...), semana: str = Form(...), parada: str = Form(...)
 ):
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("INSERT INTO ordens (tag_sap, numero_sap, executante, semana, parada, apoio) VALUES (?, ?, ?, ?, ?, ?)", (tag, numero_sap, executante, semana, parada, apoio))
+    cursor.execute("""
+        INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, dia_semana, semana, parada) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (tag, numero_sap, executante, apoio, dia_semana, semana, parada))
     cursor.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conexao.commit()
     conexao.close()
     return {"sucesso": True}
 
+# --- ROTAS DO MECÂNICO ---
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
+    # Mostra as ordens pendentes
     cursor.execute("""
-        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio
+        SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.dia_semana
         FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente'
     """)
     resultados = cursor.fetchall()
     conexao.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8]} for l in resultados]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "dia_semana": l[11]} for l in resultados]
 
 @app.post("/executar")
 async def registrar_execucao(
