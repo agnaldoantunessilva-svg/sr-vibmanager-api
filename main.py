@@ -24,7 +24,6 @@ def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     
-    # Tabela de TAGs Importadas
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags_importadas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +36,6 @@ def iniciar_banco():
         )
     """)
     
-    # Tabela de Ordens
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS ordens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +49,6 @@ def iniciar_banco():
         )
     """)
     
-    # Usuários
     cursor.execute("CREATE TABLE IF NOT EXISTS usuarios (matricula TEXT UNIQUE, senha TEXT, nome TEXT, perfil TEXT)")
     try:
         cursor.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'João Mecânico', 'mecanico')")
@@ -74,48 +71,45 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
-# ROTA DE IMPORTAÇÃO: Agora lê o arquivo TXT do Sigpred
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
-    texto = conteudo.decode('utf-8', errors='ignore') # Lida com acentos corrompidos
+    texto = conteudo.decode('utf-8', errors='ignore') 
     
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     importados = 0
 
-    # Divide o texto grande em blocos, cada bloco é um relatório
+    # Divide o texto em blocos de relatórios
     blocos = texto.split("RELATÓRIO OPERACIONAL DE INSPEÇĂO")
     
     for bloco in blocos:
         if not bloco.strip(): continue
         
-        # 1. Extrai a TAG
+        # Extrai a TAG
         tag_match = re.search(r"Tag\s*SAP:\s*([^\s]+)", bloco)
         if not tag_match: continue
         tag = tag_match.group(1).strip()
         
-        # 2. Extrai a Criticidade (Pega o primeiro A1, A2, A3 que aparecer após a data)
+        # Extrai a Criticidade
         crit_match = re.search(r"Data:\s*\d{2}/\d{2}/\d{2}\s*(A1|A2|A3|A4|N|P|M)", bloco)
         if not crit_match: continue
         criticidade = crit_match.group(1).strip()
         
-        # 3. Extrai a Descrição
+        # Extrai a Descrição
         desc_match = re.search(r"Descriçăo:\s*(.*?)\s*Resp\.:", bloco, re.DOTALL)
         descricao = desc_match.group(1).strip() if desc_match else "Sem descrição"
         
-        # 4. Extrai o Diagnóstico
+        # Extrai o Diagnóstico
         diag_match = re.search(r"DIAGNÓSTICO:\s*(.*?)\s*RECOMENDAÇŐES:", bloco, re.DOTALL)
         diagnostico = diag_match.group(1).strip() if diag_match else "Sem diagnóstico"
         
-        # 5. Extrai a Recomendação
+        # Extrai a Recomendação
         rec_match = re.search(r"RECOMENDAÇŐES:\s*(.*?)\s*FEED-BACK:", bloco, re.DOTALL)
         recomendacao = rec_match.group(1).strip() if rec_match else "Sem recomendação"
 
-        # Se for um alarme válido (A1, A2 ou A3), salva no banco
         if criticidade in ['A1', 'A2', 'A3']:
             try:
-                # Limpa o texto (remove quebras de linha excessivas)
                 diagnostico = " ".join(diagnostico.split())
                 recomendacao = " ".join(recomendacao.split())
                 
@@ -125,7 +119,7 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
                 """, (tag, descricao, criticidade, diagnostico, recomendacao))
                 importados += 1
             except sqlite3.IntegrityError:
-                pass # Se a TAG já existe, pula
+                pass 
                 
     conexao.commit()
     conexao.close()
