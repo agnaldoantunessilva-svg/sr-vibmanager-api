@@ -6,6 +6,7 @@ import os
 import uuid
 import sqlite3
 import re
+import email
 from datetime import datetime, timedelta
 
 app = FastAPI(title="SR VibManager API")
@@ -25,7 +26,6 @@ def iniciar_banco():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     
-    # Novas colunas na tabela para guardar os dados extras e imagens
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tags_importadas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,10 +36,6 @@ def iniciar_banco():
             recomendacao TEXT,
             data_inspecao TEXT,
             num_relatorio TEXT,
-            foto_equip TEXT,
-            foto_croqui TEXT,
-            foto_dados TEXT,
-            foto_tendencia TEXT,
             status TEXT DEFAULT 'Aguardando PCM'
         )
     """)
@@ -79,26 +75,27 @@ async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
     if usuario: return {"sucesso": True, "nome": usuario[0], "perfil": usuario[1]}
     raise HTTPException(status_code=401, detail="Incorreto")
 
-# ROTA DE IMPORTAÇÃO: Extrai TUDO do HTML (textos e imagens)
+# ROTA DE IMPORTAÇÃO: Agora lê arquivos .mht e .html
 @app.post("/importar_sigpred")
 async def importar_sigpred(arquivo: UploadFile = File(...)):
     conteudo = await arquivo.read()
-    texto = conteudo.decode('windows-1252', errors='ignore') 
     
-    soup = BeautifulSoup(texto, 'html.parser')
-    
-    # Extrai todas as imagens do HTML e converte para Base64 para salvar no banco
-    imagens_base64 = []
-    for img in soup.find_all('img'):
-        src = img.get('src', '')
-        if src.startswith('file:///'): # O Word salva o caminho local
-            # Como não temos acesso à pasta local do Word, avisaremos o usuário
-            # Para o teste funcionar 100%, a melhor forma é a imagem já vir em Base64
-            pass
-        if src.startswith('data:image'):
-            imagens_base64.append(src)
+    # Verifica se é um arquivo .mht (MIME) ou .html
+    if arquivo.filename.endswith('.mht') or arquivo.filename.endswith('.mhtml'):
+        # Usa a biblioteca email para ler o arquivo .mht
+        msg = email.message_from_bytes(conteudo)
+        texto_html = ""
+        for part in msg.walk():
+            if part.get_content_type() == 'text/html':
+                texto_html = part.get_payload(decode=True).decode('windows-1252', errors='ignore')
+                break
+    else:
+        # Se for .html, lê direto
+        texto_html = conteudo.decode('windows-1252', errors='ignore')
 
+    soup = BeautifulSoup(texto_html, 'html.parser')
     texto_limpo = soup.get_text(separator='\n')
+    
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
     importados = 0
@@ -130,12 +127,10 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 
         if criticidade in ['A1', 'A2', 'A3']:
             try:
-                # Como o HTML do Word não embute a imagem em Base64, usamos placeholders por enquanto.
-                # (Na próxima etapa ensinaremos o Excel/Sigpred a exportar com imagens embutidas).
                 cursor.execute("""
-                    INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio, foto_equip, foto_croqui, foto_dados, foto_tendencia)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (tag, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio, 'placeholder.jpg', 'placeholder.jpg', 'placeholder.jpg', 'placeholder.jpg'))
+                    INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (tag, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio))
                 importados += 1
             except sqlite3.IntegrityError:
                 pass 
@@ -148,21 +143,10 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 async def listar_tags_pcm():
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("""
-        SELECT tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao 
-        FROM tags_importadas WHERE status = 'Aguardando PCM'
-    """)
+    cursor.execute("SELECT tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE status = 'Aguardando PCM'")
     resultados = cursor.fetchall()
     conexao.close()
-    
-    tags = []
-    for l in resultados:
-        tags.append({
-            "tag": l[0], "descricao": l[1], "criticidade": l[2], 
-            "data_inspecao": l[3], "num_relatorio": l[4], 
-            "diagnostico": l[5], "recomendacao": l[6]
-        })
-    return tags
+    return [{"tag": l[0], "descricao": l[1], "criticidade": l[2], "data_inspecao": l[3], "num_relatorio": l[4], "diagnostico": l[5], "recomendacao": l[6]} for l in resultados]
 
 @app.post("/programar_ordem")
 async def programar_ordem(
@@ -171,11 +155,7 @@ async def programar_ordem(
 ):
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("""
-        INSERT INTO ordens (tag_sap, numero_sap, executante, semana, parada, apoio)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (tag, numero_sap, executante, semana, parada, apoio))
-    
+    cursor.execute("INSERT INTO ordens (tag_sap, numero_sap, executante, semana, parada, apoio) VALUES (?, ?, ?, ?, ?, ?)", (tag, numero_sap, executante, semana, parada, apoio))
     cursor.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conexao.commit()
     conexao.close()
@@ -187,21 +167,11 @@ async def listar_minhas_ordens():
     cursor = conexao.cursor()
     cursor.execute("""
         SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio
-        FROM ordens o
-        JOIN tags_importadas t ON o.tag_sap = t.tag_sap
-        WHERE o.status = 'Pendente'
+        FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente'
     """)
     resultados = cursor.fetchall()
     conexao.close()
-    
-    ordens = []
-    for linha in resultados:
-        ordens.append({
-            "id": linha[0], "tag": linha[1], "descricao": linha[2], "criticidade": linha[3], 
-            "numero_sap": linha[4], "diagnostico": linha[5], "recomendacao": linha[6],
-            "data_inspecao": linha[7], "num_relatorio": linha[8]
-        })
-    return ordens
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8]} for l in resultados]
 
 @app.post("/executar")
 async def registrar_execucao(
@@ -221,10 +191,7 @@ async def registrar_execucao(
 
     conexao = sqlite3.connect("sr_vibmanager.db")
     cursor = conexao.cursor()
-    cursor.execute("""
-        INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora)
-        VALUES (?, ?, ?, ?, ?)
-    """, (tag, observacao, id_foto_antes, id_foto_depois, data_formatada))
+    cursor.execute("INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora) VALUES (?, ?, ?, ?, ?)", (tag, observacao, id_foto_antes, id_foto_depois, data_formatada))
     cursor.execute("UPDATE ordens SET status = 'Concluída' WHERE tag_sap = ?", (tag,))
     conexao.commit()
     conexao.close()
