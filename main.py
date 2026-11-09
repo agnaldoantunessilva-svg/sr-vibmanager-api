@@ -13,7 +13,6 @@ def iniciar_banco():
     conn = sqlite3.connect("sr_vibmanager.db")
     cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
-    # Adicionado o campo duracao_dias
     cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, duracao_dias INTEGER DEFAULT 1, status TEXT DEFAULT 'Pendente')""")
     cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT, matricula TEXT UNIQUE, senha TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
@@ -45,6 +44,16 @@ async def cadastrar_equipe(nome: str = Form(...), funcao: str = Form(...), matri
         cur.execute("INSERT INTO equipe (nome, funcao, matricula, senha) VALUES (?, ?, ?, '1234')", (nome, funcao, matricula)); 
         conn.commit(); ret = {"sucesso": True}
     except sqlite3.IntegrityError: ret = {"sucesso": False, "erro": "Matrícula ou Nome já cadastrado"}
+    conn.close(); return ret
+
+# NOVA ROTA: EDITAR MEMBRO DA EQUIPE
+@app.post("/editar_equipe")
+async def editar_equipe(id: int = Form(...), funcao: str = Form(...), matricula: str = Form(...)):
+    conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
+    try:
+        cur.execute("UPDATE equipe SET funcao = ?, matricula = ? WHERE id = ?", (funcao, matricula, id))
+        conn.commit(); ret = {"sucesso": True}
+    except sqlite3.IntegrityError: ret = {"sucesso": False, "erro": "Matrícula já em uso"}
     conn.close(); return ret
 
 @app.post("/importar_sigpred")
@@ -105,10 +114,25 @@ async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), exe
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens(executante: str):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    # Aqui o SQL traz a flag is_executante
     cur.execute("""SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.data_execucao, o.duracao_dias, CASE WHEN o.executante = ? THEN 1 ELSE 0 END AS is_executante FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)""", (executante, executante, executante))
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "is_executante": l[13]} for l in res]
+
+# NOVA ROTA: LISTAR TODAS AS ORDENS PROGRAMADAS (PARA O ANALISTA)
+@app.get("/todas_ordens_programadas")
+async def todas_ordens_programadas():
+    conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
+    cur.execute("""SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, o.executante, o.apoio, o.data_execucao FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap ORDER BY o.data_execucao ASC""")
+    res = cur.fetchall(); conn.close()
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "executante": l[5], "apoio": l[6], "data_execucao": l[7]} for l in res]
+
+# NOVA ROTA: BUSCAR RELATÓRIO PELO NÚMERO OU TAG (PARA O ANALISTA)
+@app.get("/buscar_relatorio")
+async def buscar_relatorio(termo: str):
+    conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
+    cur.execute("SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE num_relatorio LIKE ? OR tag_sap LIKE ?", ('%'+termo+'%', '%'+termo+'%'))
+    res = cur.fetchall(); conn.close()
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
 
 @app.post("/executar")
 async def registrar_execucao(tag: str = Form(...), observacao: str = Form(...), foto_antes: UploadFile = File(...), foto_depois: UploadFile = File(...)):
