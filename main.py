@@ -136,7 +136,6 @@ async def listar_minhas_ordens(executante: str):
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "status": l[13], "is_executante": l[14]} for l in res]
 
-# ROTA CORRIGIDA: TRAZ DIAGNOSTICO E RECOMENDACAO
 @app.get("/todas_ordens_programadas")
 async def todas_ordens_programadas():
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
@@ -155,6 +154,30 @@ async def buscar_relatorio(termo: str):
     cur.execute("SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE num_relatorio LIKE ? OR tag_sap LIKE ?", ('%'+termo+'%', '%'+termo+'%'))
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
+
+# NOVA ROTA: DASHBOARD DO COORDENADOR
+@app.get("/dashboard")
+async def dados_dashboard():
+    conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM ordens"); total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM ordens WHERE status = 'Pendente'"); pendentes = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM ordens WHERE status = 'Encerrada'"); encerradas = cur.fetchone()[0]
+    
+    # Ordens críticas pendentes (A2 ou atrasadas)
+    cur.execute("""
+        SELECT o.tag_sap, COALESCE(t.criticidade, 'MANUAL'), o.executante, o.data_execucao 
+        FROM ordens o LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap 
+        WHERE o.status = 'Pendente' AND (t.criticidade = 'A2' OR o.data_execucao < date('now'))
+    """)
+    alertas = cur.fetchall()
+    
+    conn.close()
+    return {
+        "total": total, 
+        "pendentes": pendentes, 
+        "encerradas": encerradas, 
+        "alertas": [{"tag": a[0], "crit": a[1], "exec": a[2], "data": a[3]} for a in alertas]
+    }
 
 @app.post("/executar")
 async def registrar_execucao(
