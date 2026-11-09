@@ -13,7 +13,6 @@ def iniciar_banco():
     conn = sqlite3.connect("sr_vibmanager.db")
     cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
-    # TABELA ORDENS AGORA TEM STATUS
     cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, duracao_dias INTEGER DEFAULT 1, status TEXT DEFAULT 'Pendente', descricao_manual TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT, matricula TEXT UNIQUE, senha TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
@@ -137,12 +136,18 @@ async def listar_minhas_ordens(executante: str):
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "status": l[13], "is_executante": l[14]} for l in res]
 
+# ROTA MODIFICADA: TRAZ O NUMERO DO RELATORIO E ORDENA
 @app.get("/todas_ordens_programadas")
 async def todas_ordens_programadas():
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("""SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, o.executante, o.apoio, o.data_execucao, o.status FROM ordens o LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap ORDER BY o.data_execucao ASC""")
+    cur.execute("""
+        SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, o.executante, o.apoio, o.data_execucao, o.status, COALESCE(t.num_relatorio, 'MANUAL') as num_relatorio 
+        FROM ordens o 
+        LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap 
+        ORDER BY num_relatorio ASC
+    """)
     res = cur.fetchall(); conn.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "executante": l[5], "apoio": l[6], "data_execucao": l[7], "status": l[8]} for l in res]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "executante": l[5], "apoio": l[6], "data_execucao": l[7], "status": l[8], "num_relatorio": l[9]} for l in res]
 
 @app.get("/buscar_relatorio")
 async def buscar_relatorio(termo: str):
