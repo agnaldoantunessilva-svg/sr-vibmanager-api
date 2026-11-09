@@ -13,7 +13,8 @@ def iniciar_banco():
     conn = sqlite3.connect("sr_vibmanager.db")
     cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, status TEXT DEFAULT 'Pendente')""")
+    # Adicionado o campo duracao_dias
+    cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, duracao_dias INTEGER DEFAULT 1, status TEXT DEFAULT 'Pendente')""")
     cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT, matricula TEXT UNIQUE, senha TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
     conn.commit()
@@ -23,16 +24,12 @@ iniciar_banco()
 
 @app.post("/login")
 async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
-    # REGRA DA SENHA MESTRE (ADM)
     if matricula.lower() == 'adm' and senha == 'adm':
         return {"sucesso": True, "nome": "Administrador", "perfil": "adm"}
-    
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
     cur.execute("SELECT nome, funcao FROM equipe WHERE matricula = ? AND senha = ?", (matricula, senha))
     user = cur.fetchone(); conn.close()
-    
-    if user:
-        return {"sucesso": True, "nome": user[0], "perfil": user[1].lower()}
+    if user: return {"sucesso": True, "nome": user[0], "perfil": user[1].lower()}
     raise HTTPException(status_code=401, detail="Incorreto")
 
 @app.get("/equipe")
@@ -87,39 +84,31 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 @app.get("/tags_pcm")
 async def listar_tags_pcm():
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    # AQUI ESTÁ A ORDENAÇÃO CUSTOMIZADA: A2 (1), A1 (2), A3 (3)
     cur.execute("""
         SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao 
-        FROM tags_importadas 
-        WHERE status = 'Aguardando PCM' 
-        ORDER BY 
-            CASE criticidade 
-                WHEN 'A2' THEN 1 
-                WHEN 'A1' THEN 2 
-                WHEN 'A3' THEN 3 
-                ELSE 4 
-            END ASC, 
-            tag_sap ASC
+        FROM tags_importadas WHERE status = 'Aguardando PCM' 
+        ORDER BY CASE criticidade WHEN 'A2' THEN 1 WHEN 'A1' THEN 2 WHEN 'A3' THEN 3 ELSE 4 END ASC, tag_sap ASC
     """)
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
 
 @app.post("/programar_ordem")
-async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...), apoio: str = Form(...), data_execucao: str = Form(...)):
+async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...), apoio: str = Form(...), data_execucao: str = Form(...), duracao_dias: int = Form(...)):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
     if '/' in data_execucao:
         p = data_execucao.split('/')
         if len(p) == 3: data_execucao = f"{p[2]}-{p[1]}-{p[0]}"
-    cur.execute("""INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, data_execucao) VALUES (?, ?, ?, ?, ?)""", (tag, numero_sap, executante, apoio, data_execucao))
+    cur.execute("""INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, data_execucao, duracao_dias) VALUES (?, ?, ?, ?, ?, ?)""", (tag, numero_sap, executante, apoio, data_execucao, duracao_dias))
     cur.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conn.commit(); conn.close(); return {"sucesso": True}
 
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens(executante: str):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("""SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.data_execucao FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)""", (executante, executante))
+    # Aqui o SQL traz a flag is_executante
+    cur.execute("""SELECT o.id, o.tag_sap, t.descricao, t.criticidade, o.numero_sap, t.diagnostico, t.recomendacao, t.data_inspecao, t.num_relatorio, o.executante, o.apoio, o.data_execucao, o.duracao_dias, CASE WHEN o.executante = ? THEN 1 ELSE 0 END AS is_executante FROM ordens o JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)""", (executante, executante, executante))
     res = cur.fetchall(); conn.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11]} for l in res]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "is_executante": l[13]} for l in res]
 
 @app.post("/executar")
 async def registrar_execucao(tag: str = Form(...), observacao: str = Form(...), foto_antes: UploadFile = File(...), foto_depois: UploadFile = File(...)):
@@ -131,6 +120,3 @@ async def registrar_execucao(tag: str = Form(...), observacao: str = Form(...), 
     cur.execute("INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora) VALUES (?, ?, ?, ?, ?)", (tag, observacao, id_a, id_d, data))
     cur.execute("UPDATE ordens SET status = 'Concluída' WHERE tag_sap = ?", (tag,))
     conn.commit(); conn.close(); return {"sucesso": True}
-
-if __name__ == "__main__":
-    import uvicorn; uvicorn.run(app, host="0.0.0.0", port=8000)
