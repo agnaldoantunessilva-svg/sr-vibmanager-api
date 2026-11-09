@@ -13,6 +13,7 @@ def iniciar_banco():
     conn = sqlite3.connect("sr_vibmanager.db")
     cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
+    # TABELA ORDENS AGORA TEM STATUS
     cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, duracao_dias INTEGER DEFAULT 1, status TEXT DEFAULT 'Pendente', descricao_manual TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT, matricula TEXT UNIQUE, senha TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
@@ -83,7 +84,7 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
         diagnostico = diag_match.group(1).strip() if diag_match else "Sem diagnóstico"
         rec_match = re.search(r"RECOMENDA[ÇC][ÕO]ES:\s*(.*?)\s*FEED-BACK:", bloco, re.IGNORECASE | re.DOTALL)
         recomendacao = rec_match.group(1).strip() if rec_match else "Sem recomendação"
-        if criticidade in ['A1', 'A2', 'A3']:
+        if criticidade in ['A1', 'A2', 'A3', 'A4']:
             try:
                 cur.execute("""INSERT INTO tags_importadas (tag_sap, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio) VALUES (?, ?, ?, ?, ?, ?, ?)""", (tag, descricao, criticidade, diagnostico, recomendacao, data_inspecao, num_relatorio)); importados += 1
             except sqlite3.IntegrityError: pass 
@@ -95,7 +96,7 @@ async def listar_tags_pcm():
     cur.execute("""
         SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao 
         FROM tags_importadas WHERE status = 'Aguardando PCM' 
-        ORDER BY CASE criticidade WHEN 'A2' THEN 1 WHEN 'A1' THEN 2 WHEN 'A3' THEN 3 ELSE 4 END ASC, tag_sap ASC
+        ORDER BY CASE criticidade WHEN 'A2' THEN 1 WHEN 'A1' THEN 2 WHEN 'A3' THEN 3 WHEN 'A4' THEN 4 ELSE 5 END ASC, tag_sap ASC
     """)
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
@@ -124,25 +125,24 @@ async def criar_ordem_manual(
                 (numero_sap, executante, data_execucao, duracao_dias, descricao))
     conn.commit(); conn.close(); return {"sucesso": True}
 
-# ROTA CORRIGIDA PARA TRAZER ORDENS MANUAIS E DA PREDITIVA
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens(executante: str):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
     cur.execute("""
-        SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, COALESCE(t.diagnostico, 'Ordem Manual'), COALESCE(t.recomendacao, 'Realizar serviço conforme descrito'), COALESCE(t.data_inspecao, ''), COALESCE(t.num_relatorio, 'MANUAL'), o.executante, o.apoio, o.data_execucao, o.duracao_dias, CASE WHEN o.executante = ? THEN 1 ELSE 0 END AS is_executante 
+        SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, COALESCE(t.diagnostico, 'Ordem Manual'), COALESCE(t.recomendacao, 'Realizar serviço conforme descrito'), COALESCE(t.data_inspecao, ''), COALESCE(t.num_relatorio, 'MANUAL'), o.executante, o.apoio, o.data_execucao, o.duracao_dias, o.status, CASE WHEN o.executante = ? THEN 1 ELSE 0 END AS is_executante 
         FROM ordens o 
         LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap 
         WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)
     """, (executante, executante, executante))
     res = cur.fetchall(); conn.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "is_executante": l[13]} for l in res]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "status": l[13], "is_executante": l[14]} for l in res]
 
 @app.get("/todas_ordens_programadas")
 async def todas_ordens_programadas():
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("""SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, o.executante, o.apoio, o.data_execucao FROM ordens o LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap ORDER BY o.data_execucao ASC""")
+    cur.execute("""SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, o.executante, o.apoio, o.data_execucao, o.status FROM ordens o LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap ORDER BY o.data_execucao ASC""")
     res = cur.fetchall(); conn.close()
-    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "executante": l[5], "apoio": l[6], "data_execucao": l[7]} for l in res]
+    return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "executante": l[5], "apoio": l[6], "data_execucao": l[7], "status": l[8]} for l in res]
 
 @app.get("/buscar_relatorio")
 async def buscar_relatorio(termo: str):
@@ -152,12 +152,23 @@ async def buscar_relatorio(termo: str):
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
 
 @app.post("/executar")
-async def registrar_execucao(tag: str = Form(...), observacao: str = Form(...), foto_antes: UploadFile = File(...), foto_depois: UploadFile = File(...)):
-    id_a = str(uuid.uuid4()) + "_antes.jpg"; id_d = str(uuid.uuid4()) + "_depois.jpg"
-    with open(f"fotos/{id_a}", "wb") as b: shutil.copyfileobj(foto_antes.file, b)
-    with open(f"fotos/{id_d}", "wb") as b: shutil.copyfileobj(foto_depois.file, b)
+async def registrar_execucao(
+    id_ordem: int = Form(...),
+    tag: str = Form(...), 
+    observacao: str = Form(...), 
+    foto_antes: UploadFile = File(None), 
+    foto_depois: UploadFile = File(None)
+):
+    id_a = ""; id_d = ""
+    if foto_antes and foto_antes.filename:
+        id_a = str(uuid.uuid4()) + "_antes.jpg"
+        with open(f"fotos/{id_a}", "wb") as b: shutil.copyfileobj(foto_antes.file, b)
+    if foto_depois and foto_depois.filename:
+        id_d = str(uuid.uuid4()) + "_depois.jpg"
+        with open(f"fotos/{id_d}", "wb") as b: shutil.copyfileobj(foto_depois.file, b)
+
     data = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M:%S")
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
     cur.execute("INSERT INTO execucoes_v2 (tag, observacao, foto_antes, foto_depois, data_hora) VALUES (?, ?, ?, ?, ?)", (tag, observacao, id_a, id_d, data))
-    cur.execute("UPDATE ordens SET status = 'Concluída' WHERE id = ?", (tag,))
+    cur.execute("UPDATE ordens SET status = 'Encerrada' WHERE id = ?", (id_ordem,))
     conn.commit(); conn.close(); return {"sucesso": True}
