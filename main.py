@@ -110,26 +110,30 @@ async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), exe
     cur.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conn.commit(); conn.close(); return {"sucesso": True}
 
-# NOVA ROTA: CRIAR ORDEM MANUAL
 @app.post("/criar_ordem_manual")
 async def criar_ordem_manual(
     solicitante: str = Form(...), 
+    executante: str = Form(...),
     data_execucao: str = Form(...), 
     numero_sap: str = Form(...), 
     descricao: str = Form(...), 
     duracao_dias: int = Form(...)
 ):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    # A tag_sap manual fica "MANUAL" para não quebrar o JOIN do mecânico
     cur.execute("""INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, data_execucao, duracao_dias, descricao_manual) VALUES ('MANUAL', ?, ?, '', ?, ?, ?)""", 
-                (numero_sap, solicitante, data_execucao, duracao_dias, descricao))
+                (numero_sap, executante, data_execucao, duracao_dias, descricao))
     conn.commit(); conn.close(); return {"sucesso": True}
 
+# ROTA CORRIGIDA PARA TRAZER ORDENS MANUAIS E DA PREDITIVA
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens(executante: str):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    # O LEFT JOIN permite trazer ordens que não têm tag (ordens manuais)
-    cur.execute("""SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, COALESCE(t.diagnostico, 'Ordem Manual'), COALESCE(t.recomendacao, 'Realizar serviço conforme descrito'), COALESCE(t.data_inspecao, ''), COALESCE(t.num_relatorio, 'MANUAL'), o.executante, o.apoio, o.data_execucao, o.duracao_dias, CASE WHEN o.executante = ? THEN 1 ELSE 0 END AS is_executante FROM ordens o LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)""", (executante, executante, executante))
+    cur.execute("""
+        SELECT o.id, o.tag_sap, COALESCE(t.descricao, o.descricao_manual), COALESCE(t.criticidade, 'MANUAL'), o.numero_sap, COALESCE(t.diagnostico, 'Ordem Manual'), COALESCE(t.recomendacao, 'Realizar serviço conforme descrito'), COALESCE(t.data_inspecao, ''), COALESCE(t.num_relatorio, 'MANUAL'), o.executante, o.apoio, o.data_execucao, o.duracao_dias, CASE WHEN o.executante = ? THEN 1 ELSE 0 END AS is_executante 
+        FROM ordens o 
+        LEFT JOIN tags_importadas t ON o.tag_sap = t.tag_sap 
+        WHERE o.status = 'Pendente' AND (o.executante = ? OR o.apoio = ?)
+    """, (executante, executante, executante))
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "numero_sap": l[4], "diagnostico": l[5], "recomendacao": l[6], "data_inspecao": l[7], "num_relatorio": l[8], "executante": l[9], "apoio": l[10], "data_execucao": l[11], "duracao_dias": l[12], "is_executante": l[13]} for l in res]
 
