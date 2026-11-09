@@ -13,15 +13,9 @@ def iniciar_banco():
     conn = sqlite3.connect("sr_vibmanager.db")
     cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS tags_importadas (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT UNIQUE, descricao TEXT, criticidade TEXT, diagnostico TEXT, recomendacao TEXT, data_inspecao TEXT, num_relatorio TEXT, status TEXT DEFAULT 'Aguardando PCM')""")
-    # TABELA ORDENS SEM DIA DA SEMANA
     cur.execute("""CREATE TABLE IF NOT EXISTS ordens (id INTEGER PRIMARY KEY AUTOINCREMENT, tag_sap TEXT, numero_sap TEXT, executante TEXT, apoio TEXT, data_execucao TEXT, status TEXT DEFAULT 'Pendente')""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS equipe (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE, funcao TEXT, matricula TEXT UNIQUE, senha TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS execucoes_v2 (id INTEGER PRIMARY KEY AUTOINCREMENT, tag TEXT, observacao TEXT, foto_antes TEXT, foto_depois TEXT, data_hora TEXT)""")
-    cur.execute("CREATE TABLE IF NOT EXISTS usuarios (matricula TEXT UNIQUE, senha TEXT, nome TEXT, perfil TEXT)")
-    try:
-        cur.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('1045', '1234', 'Agnaldo', 'mecanico')")
-        cur.execute("INSERT INTO usuarios (matricula, senha, nome, perfil) VALUES ('2000', '1234', 'Ricardo PCM', 'pcm')")
-    except sqlite3.IntegrityError: pass 
     conn.commit()
     conn.close()
 
@@ -29,24 +23,31 @@ iniciar_banco()
 
 @app.post("/login")
 async def fazer_login(matricula: str = Form(...), senha: str = Form(...)):
+    # REGRA DA SENHA MESTRE (ADM)
+    if matricula.lower() == 'adm' and senha == 'adm':
+        return {"sucesso": True, "nome": "Administrador", "perfil": "adm"}
+    
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("SELECT nome, perfil FROM usuarios WHERE matricula = ? AND senha = ?", (matricula, senha))
+    cur.execute("SELECT nome, funcao FROM equipe WHERE matricula = ? AND senha = ?", (matricula, senha))
     user = cur.fetchone(); conn.close()
-    if user: return {"sucesso": True, "nome": user[0], "perfil": user[1]}
+    
+    if user:
+        return {"sucesso": True, "nome": user[0], "perfil": user[1].lower()}
     raise HTTPException(status_code=401, detail="Incorreto")
 
 @app.get("/equipe")
 async def listar_equipe():
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("SELECT id, nome, funcao FROM equipe"); res = cur.fetchall(); conn.close()
-    return [{"id": l[0], "nome": l[1], "funcao": l[2]} for l in res]
+    cur.execute("SELECT id, nome, funcao, matricula FROM equipe"); res = cur.fetchall(); conn.close()
+    return [{"id": l[0], "nome": l[1], "funcao": l[2], "matricula": l[3]} for l in res]
 
 @app.post("/cadastrar_equipe")
-async def cadastrar_equipe(nome: str = Form(...), funcao: str = Form(...)):
+async def cadastrar_equipe(nome: str = Form(...), funcao: str = Form(...), matricula: str = Form(...)):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
     try:
-        cur.execute("INSERT INTO equipe (nome, funcao) VALUES (?, ?)", (nome, funcao)); conn.commit(); ret = {"sucesso": True}
-    except sqlite3.IntegrityError: ret = {"sucesso": False, "erro": "Nome já cadastrado"}
+        cur.execute("INSERT INTO equipe (nome, funcao, matricula, senha) VALUES (?, ?, ?, '1234')", (nome, funcao, matricula)); 
+        conn.commit(); ret = {"sucesso": True}
+    except sqlite3.IntegrityError: ret = {"sucesso": False, "erro": "Matrícula ou Nome já cadastrado"}
     conn.close(); return ret
 
 @app.post("/importar_sigpred")
@@ -86,24 +87,33 @@ async def importar_sigpred(arquivo: UploadFile = File(...)):
 @app.get("/tags_pcm")
 async def listar_tags_pcm():
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    cur.execute("SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao FROM tags_importadas WHERE status = 'Aguardando PCM'")
+    # AQUI ESTÁ A ORDENAÇÃO CUSTOMIZADA: A2 (1), A1 (2), A3 (3)
+    cur.execute("""
+        SELECT id, tag_sap, descricao, criticidade, data_inspecao, num_relatorio, diagnostico, recomendacao 
+        FROM tags_importadas 
+        WHERE status = 'Aguardando PCM' 
+        ORDER BY 
+            CASE criticidade 
+                WHEN 'A2' THEN 1 
+                WHEN 'A1' THEN 2 
+                WHEN 'A3' THEN 3 
+                ELSE 4 
+            END ASC, 
+            tag_sap ASC
+    """)
     res = cur.fetchall(); conn.close()
     return [{"id": l[0], "tag": l[1], "descricao": l[2], "criticidade": l[3], "data_inspecao": l[4], "num_relatorio": l[5], "diagnostico": l[6], "recomendacao": l[7]} for l in res]
 
 @app.post("/programar_ordem")
 async def programar_ordem(tag: str = Form(...), numero_sap: str = Form(...), executante: str = Form(...), apoio: str = Form(...), data_execucao: str = Form(...)):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
-    
-    # Garante que a data está no formato YYYY-MM-DD
     if '/' in data_execucao:
         p = data_execucao.split('/')
         if len(p) == 3: data_execucao = f"{p[2]}-{p[1]}-{p[0]}"
-    
     cur.execute("""INSERT INTO ordens (tag_sap, numero_sap, executante, apoio, data_execucao) VALUES (?, ?, ?, ?, ?)""", (tag, numero_sap, executante, apoio, data_execucao))
     cur.execute("UPDATE tags_importadas SET status = 'Programada' WHERE tag_sap = ?", (tag,))
     conn.commit(); conn.close(); return {"sucesso": True}
 
-# BUSCA TODAS AS ORDENS DO MECÂNICO (O FRONTEND VAI FILTRAR POR DATA)
 @app.get("/minhas_ordens")
 async def listar_minhas_ordens(executante: str):
     conn = sqlite3.connect("sr_vibmanager.db"); cur = conn.cursor()
